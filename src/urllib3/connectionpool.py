@@ -26,6 +26,7 @@ from .exceptions import (
 from .packages.ssl_match_hostname import CertificateError
 from .packages import six
 from .packages.six.moves import queue
+from .packages.six.moves.urllib.parse import quote
 from ._collections import HTTPHeaderDict
 from .connection import (
     port_by_scheme,
@@ -41,7 +42,9 @@ from .util.request import set_file_position
 from .util.response import assert_header_parsing
 from .util.retry import Retry
 from .util.timeout import Timeout
-from .util.url import get_host, Url, NORMALIZABLE_SCHEMES
+from .util.url import (
+    get_host, Url, NORMALIZABLE_SCHEMES, _contains_disallowed_url_pchar_re,
+)
 from .util.queue import LifoQueue
 
 
@@ -546,6 +549,11 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
 
         if release_conn is None:
             release_conn = response_kw.get('preload_content', True)
+
+        # Prevent CVE-2019-11236: percent-encode control characters and spaces
+        # in the request target so they can't inject into the request line.
+        if isinstance(url, six.string_types):
+            url = _contains_disallowed_url_pchar_re.sub(lambda match: quote(match.group()), url)
 
         # Check host
         if assert_same_host and not self.is_same_host(url):

@@ -2,7 +2,7 @@
 # rather than the socket level-ness of it.
 
 from urllib3 import HTTPConnectionPool, HTTPSConnectionPool
-from urllib3.poolmanager import proxy_from_url
+from urllib3.poolmanager import proxy_from_url, PoolManager
 from urllib3.exceptions import (
         MaxRetryError,
         ProxyError,
@@ -1281,6 +1281,77 @@ class TestHeaders(SocketDummyServerTestCase):
             if k.startswith('X-Header-')
         ]
         self.assertEqual(expected_response_headers, actual_response_headers)
+
+
+class TestControlCharactersInRequestTarget(SocketDummyServerTestCase):
+    """
+    CVE-2019-11236: control characters (CR/LF) and spaces in the request URL
+    must be percent-encoded, never written raw into the request line where
+    they would inject extra headers.
+    """
+
+    INJECTED_TARGET = '/?a=1 HTTP/1.1\r\nX-Injected: header\r\nTEST: 123'
+    QUOTED_TARGET = '/?a=1%20HTTP/1.1%0D%0AX-Injected:%20header%0D%0ATEST:%20123'
+
+    def _start_request_recorder(self):
+        received = []
+
+        def socket_handler(listener):
+            sock = listener.accept()[0]
+
+            buf = b''
+            while not buf.endswith(b'\r\n\r\n'):
+                buf += sock.recv(65536)
+            received.append(buf)
+
+            sock.send((
+                'HTTP/1.1 204 No Content\r\n'
+                'Content-Length: 0\r\n'
+                '\r\n').encode('ascii'))
+            sock.close()
+
+        self._start_server(socket_handler)
+        return received
+
+    def _assert_not_injected(self, received, expected_request_line):
+        self.assertEqual(len(received), 1)
+        lines = received[0].split(b'\r\n')
+        self.assertEqual(lines[0], expected_request_line.encode('ascii'))
+        header_names = [line.split(b':', 1)[0].strip().lower() for line in lines[1:] if line]
+        self.assertNotIn(b'x-injected', header_names)
+        self.assertNotIn(b'test', header_names)
+
+    def test_connection_pool_request(self):
+        received = self._start_request_recorder()
+        pool = HTTPConnectionPool(self.host, self.port, retries=False)
+        self.addCleanup(pool.close)
+
+        r = pool.request('GET', self.INJECTED_TARGET)
+
+        self.assertEqual(r.status, 204)
+        self._assert_not_injected(received, 'GET %s HTTP/1.1' % self.QUOTED_TARGET)
+
+    def test_pool_manager_request(self):
+        received = self._start_request_recorder()
+        http = PoolManager()
+        self.addCleanup(http.clear)
+
+        url = 'http://%s:%d%s' % (self.host, self.port, self.INJECTED_TARGET)
+        r = http.request('GET', url, retries=False)
+
+        self.assertEqual(r.status, 204)
+        self._assert_not_injected(received, 'GET %s HTTP/1.1' % self.QUOTED_TARGET)
+
+    def test_proxy_manager_request(self):
+        received = self._start_request_recorder()
+        proxy = proxy_from_url('http://%s:%d' % (self.host, self.port))
+        self.addCleanup(proxy.clear)
+
+        r = proxy.request('GET', 'http://example.com' + self.INJECTED_TARGET, retries=False)
+
+        self.assertEqual(r.status, 204)
+        self._assert_not_injected(
+            received, 'GET http://example.com%s HTTP/1.1' % self.QUOTED_TARGET)
 
 
 @pytest.mark.skipif(
