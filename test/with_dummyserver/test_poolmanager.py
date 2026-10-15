@@ -1,6 +1,7 @@
 import unittest
 import json
 
+import mock
 import pytest
 
 from dummyserver.server import HAS_IPV6
@@ -291,6 +292,27 @@ class TestPoolManager(HTTPDummyServerTestCase):
         data = json.loads(r.data.decode('utf-8'))
 
         self.assertNotIn('Cookie', data)
+
+    @mock.patch('urllib3.response.GzipDecoder.decompress')
+    def test_no_decoding_with_redirect_when_preload_disabled(self, gzip_decompress):
+        """
+        Test that urllib3 does not attempt to decode a gzipped redirect
+        response when `preload_content` is set to `False`.
+        """
+        with PoolManager() as http:
+            # Three requests are expected: two redirects and one final / 200 OK.
+            r = http.request(
+                'GET',
+                '%s/redirect' % self.base_url,
+                fields={
+                    'target': '%s/redirect?compressed=true' % self.base_url,
+                    'compressed': 'true',
+                },
+                preload_content=False,
+            )
+            assert r.status == 200
+            assert r._pool.num_requests == 3
+            gzip_decompress.assert_not_called()
 
     def test_303_redirect_makes_request_lose_body(self):
         with PoolManager() as http:

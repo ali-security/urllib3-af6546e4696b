@@ -621,6 +621,91 @@ class TestResponse(object):
         while not br.closed:
             br.read(5)
 
+    def test_read_with_illegal_mix_decode_toggle(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+        data = compress.compress(b'foo')
+        data += compress.flush()
+
+        fp = BytesIO(data)
+
+        resp = HTTPResponse(
+            fp, headers={'content-encoding': 'deflate'}, preload_content=False
+        )
+
+        assert resp.read(1) == b'f'
+
+        with pytest.raises(
+            RuntimeError,
+            match=(
+                r'Calling read\(decode_content=False\) is not supported after '
+                r'read\(decode_content=True\) was called'
+            ),
+        ):
+            resp.read(1, decode_content=False)
+
+    def test_read_with_mix_decode_toggle(self):
+        compress = zlib.compressobj(6, zlib.DEFLATED, -zlib.MAX_WBITS)
+        data = compress.compress(b'foo')
+        data += compress.flush()
+
+        fp = BytesIO(data)
+
+        resp = HTTPResponse(
+            fp, headers={'content-encoding': 'deflate'}, preload_content=False
+        )
+        resp.read(1, decode_content=False)
+        assert resp.read(1, decode_content=True) == b'o'
+
+    @pytest.mark.parametrize(
+        'data',
+        [d[1] for d in _test_compressor_params],
+        ids=[d[0] for d in _test_compressor_params],
+    )
+    def test_drain_conn_does_not_decode_content(self, data):
+        name, compress_func = data
+        # A small but highly compressible body, like a decompression bomb.
+        compressed_data = compress_func(b'\x00' * 2 ** 20)
+        fp = BytesIO(compressed_data)
+        resp = HTTPResponse(
+            fp, headers={'content-encoding': name}, preload_content=False
+        )
+        resp._init_decoder()
+        decompress = mock.Mock(wraps=resp._decoder.decompress)
+        resp._decoder.decompress = decompress
+
+        resp.drain_conn()
+
+        decompress.assert_not_called()
+        # The body is still consumed so the connection can be reused.
+        assert resp.tell() == len(compressed_data)
+        assert fp.read() == b''
+
+    @pytest.mark.parametrize(
+        'data',
+        [d[1] for d in _test_compressor_params],
+        ids=[d[0] for d in _test_compressor_params],
+    )
+    def test_drain_conn_after_partial_read_does_not_decode_content(self, data):
+        name, compress_func = data
+        compressed_data = compress_func(b'\x00' * 2 ** 20)
+        fp = BytesIO(compressed_data)
+        resp = HTTPResponse(
+            fp, headers={'content-encoding': name}, preload_content=False
+        )
+        assert resp.read(1) == b'\x00'
+        decompress = mock.Mock(wraps=resp._decoder.decompress)
+        resp._decoder.decompress = decompress
+
+        resp.drain_conn()
+
+        decompress.assert_not_called()
+        # Decoder state is dropped rather than kept around in memory.
+        assert resp._decoder is None
+        assert len(resp._decoded_buffer) == 0
+        # The body is still consumed so the connection can be reused.
+        assert resp.tell() == len(compressed_data)
+        assert fp.read() == b''
+
     def test_streaming(self):
         fp = BytesIO(b'foo')
         resp = HTTPResponse(fp, preload_content=False)

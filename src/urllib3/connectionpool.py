@@ -670,8 +670,9 @@ class HTTPConnectionPool(ConnectionPool, RequestMethods):
         def drain_and_release_conn(response):
             try:
                 # discard any remaining response body, the connection will be
-                # released back to the pool once the entire response is read
-                response.read()
+                # released back to the pool once the entire response is read.
+                # The body is discarded without being decoded.
+                response.drain_conn()
             except (TimeoutError, HTTPException, SocketError, ProtocolError,
                     BaseSSLError, SSLError) as e:
                 pass

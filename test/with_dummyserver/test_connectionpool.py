@@ -415,6 +415,64 @@ class TestConnectionPool(HTTPDummyServerTestCase):
         self.assertEqual(r.status, 200)
         self.assertEqual(r.data, b'Dummy server!')
 
+    @mock.patch('urllib3.response.GzipDecoder.decompress')
+    def test_no_decoding_with_redirect_when_preload_disabled(self, gzip_decompress):
+        """
+        Test that urllib3 does not attempt to decode a gzipped redirect
+        response when `preload_content` is set to `False`.
+        """
+        with HTTPConnectionPool(self.host, self.port) as pool:
+            # Three requests are expected: two redirects and one final / 200 OK.
+            response = pool.request(
+                'GET',
+                '/redirect',
+                fields={'target': '/redirect?compressed=true', 'compressed': 'true'},
+                preload_content=False,
+            )
+            assert response.status == 200
+            assert pool.num_requests == 3
+            # The redirect bodies were still drained, so the connection was reused.
+            assert pool.num_connections == 1
+            gzip_decompress.assert_not_called()
+
+    @mock.patch('urllib3.response.GzipDecoder.decompress')
+    def test_no_decoding_with_too_many_redirects_when_preload_disabled(
+        self, gzip_decompress
+    ):
+        """
+        Test that urllib3 does not attempt to decode a gzipped redirect
+        response it drains before raising ``MaxRetryError``.
+        """
+        with HTTPConnectionPool(self.host, self.port) as pool:
+            with pytest.raises(MaxRetryError):
+                pool.request(
+                    'GET',
+                    '/redirect',
+                    fields={'target': '/redirect?compressed=true', 'compressed': 'true'},
+                    retries=Retry(redirect=1),
+                    preload_content=False,
+                )
+            assert pool.num_requests == 2
+            gzip_decompress.assert_not_called()
+
+    @mock.patch('urllib3.response.GzipDecoder.decompress')
+    def test_no_decoding_with_status_retry_when_preload_disabled(self, gzip_decompress):
+        """
+        Test that urllib3 does not attempt to decode a gzipped response it
+        drains before retrying on a status in ``status_forcelist``.
+        """
+        with HTTPConnectionPool(self.host, self.port) as pool:
+            with pytest.raises(MaxRetryError):
+                pool.request(
+                    'GET',
+                    '/redirect',
+                    fields={'status': '503', 'compressed': 'true'},
+                    retries=Retry(total=1, status_forcelist=[503]),
+                    preload_content=False,
+                )
+            assert pool.num_requests == 2
+            gzip_decompress.assert_not_called()
+
     def test_303_redirect_makes_request_lose_body(self):
         with HTTPConnectionPool(self.host, self.port) as pool:
             response = pool.request(

@@ -10,7 +10,7 @@ from socket import error as SocketError
 from ._collections import HTTPHeaderDict
 from .exceptions import (
     BodyNotHttplibCompatible, ProtocolError, DecodeError, ReadTimeoutError,
-    ResponseNotChunked, IncompleteRead, InvalidHeader
+    ResponseNotChunked, IncompleteRead, InvalidHeader, HTTPError
 )
 from .packages.six import string_types as basestring, PY3
 from .packages.six.moves import http_client as httplib
@@ -348,6 +348,7 @@ class HTTPResponse(io.IOBase):
         self.reason = reason
         self.strict = strict
         self.decode_content = decode_content
+        self._has_decoded_content = False
         self.retries = retries
         self.enforce_content_length = enforce_content_length
 
@@ -406,6 +407,23 @@ class HTTPResponse(io.IOBase):
 
         self._pool._put_conn(self._connection)
         self._connection = None
+
+    def drain_conn(self):
+        """
+        Read and discard any remaining HTTP response data in the response connection.
+
+        Unread data in the HTTPResponse connection blocks the connection from being
+        released back to the pool. The data is discarded without being decoded.
+        """
+        try:
+            self._raw_read()
+        except (HTTPError, SocketError, BaseSSLError, HTTPException):
+            pass
+        if self._has_decoded_content:
+            # `_raw_read` skips decompression, so we should clean up the
+            # decoder to avoid keeping unnecessary data in memory.
+            self._decoded_buffer = BytesQueueBuffer()
+            self._decoder = None
 
     @property
     def data(self):
@@ -498,12 +516,21 @@ class HTTPResponse(io.IOBase):
         """
         Decode the data passed in and potentially flush the decoder.
         """
+        if not decode_content:
+            if self._has_decoded_content:
+                raise RuntimeError(
+                    'Calling read(decode_content=False) is not supported after '
+                    'read(decode_content=True) was called.'
+                )
+            return data
+
         if max_length is None or flush_decoder:
             max_length = -1
 
         try:
             if decode_content and self._decoder:
                 data = self._decoder.decompress(data, max_length=max_length)
+                self._has_decoded_content = True
         except (IOError, zlib.error) as e:
             content_encoding = self.headers.get('content-encoding', '').lower()
             raise DecodeError(
@@ -687,6 +714,11 @@ class HTTPResponse(io.IOBase):
         else:
             # Do not waste memory on the buffer when not decoding.
             if not decode_content or not self._decoder:
+                if not decode_content and self._has_decoded_content:
+                    raise RuntimeError(
+                        'Calling read(decode_content=False) is not supported after '
+                        'read(decode_content=True) was called.'
+                    )
                 return data
 
             # Decompress at most as many bytes as were requested so a small
