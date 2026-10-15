@@ -6,7 +6,9 @@ from io import BytesIO, BufferedReader
 import pytest
 import mock
 
-from urllib3.response import HTTPResponse, BytesQueueBuffer, GzipDecoder
+from urllib3.response import (
+    _MAX_CHUNK_LINE_LENGTH, HTTPResponse, BytesQueueBuffer, GzipDecoder
+)
 from urllib3.exceptions import (
     DecodeError, ResponseNotChunked, ProtocolError, InvalidHeader
 )
@@ -1040,6 +1042,53 @@ class TestResponse(object):
         with pytest.raises(ProtocolError):
             next(resp.read_chunked())
 
+    def test_chunk_size_line_too_long(self):
+        # A malicious server can send a chunk-size line with no newline. urllib3's
+        # streaming path must reject it with a bounded read rather than buffering
+        # the whole line (memory exhaustion). See GHSA-vxq7-64xx-v4gw.
+        stream = [b'foooo']
+        fp = MockChunkedEncodingLongChunkSizeLine(stream)
+        r = httplib.HTTPResponse(MockSock)
+        r.fp = fp
+        r.chunked = True
+        r.chunk_left = None
+        resp = HTTPResponse(r, preload_content=False, headers={'transfer-encoding': 'chunked'})
+        with pytest.raises(ProtocolError) as ctx:
+            next(resp.read_chunked())
+
+        assert 'chunk size line exceeded maximum allowed length' in str(ctx.value)
+
+    @pytest.mark.parametrize('trailer_length', [
+        _MAX_CHUNK_LINE_LENGTH - 1,
+        _MAX_CHUNK_LINE_LENGTH,
+        _MAX_CHUNK_LINE_LENGTH + 1,
+    ])
+    @pytest.mark.parametrize('line_ending', [b'\r\n', b''])
+    def test_chunk_trailer_line_length(self, trailer_length, line_ending):
+        # The line limit includes its CRLF, but not the final blank line.
+        trailer = b'X:' + b'x' * (trailer_length - 2 - len(line_ending)) + line_ending
+        fp = BytesIO(b'3\r\nfoo\r\n0\r\n' + trailer + (b'\r\n' if line_ending else b''))
+        r = httplib.HTTPResponse(MockSock, method='GET')
+        r.fp = fp
+        resp = HTTPResponse(r, preload_content=False,
+                            headers={'transfer-encoding': 'chunked'},
+                            original_response=r)
+        chunks = resp.read_chunked()
+        assert next(chunks) == b'foo'
+
+        if trailer_length > _MAX_CHUNK_LINE_LENGTH:
+            with pytest.raises(
+                ProtocolError,
+                match='Response chunk trailer line exceeded maximum allowed length',
+            ):
+                next(chunks)
+        else:
+            assert list(chunks) == []
+
+        assert fp.closed
+        assert r.isclosed()
+        assert resp.closed
+
     def test_chunked_response_without_crlf_on_end(self):
         stream = [b"foo", b"bar", b"baz"]
         fp = MockChunkedEncodingWithoutCRLFOnEnd(stream)
@@ -1172,8 +1221,20 @@ class MockChunkedEncodingResponse(object):
                 self.cur_chunk = self.cur_chunk[amt:]
             return chunk_part
 
-    def readline(self):
-        return self.pop_current_chunk(till_crlf=True)
+    def readline(self, limit=-1):
+        # Emulate a real file object's readline(size): return bytes up to and
+        # including the first newline, or at most ``limit`` bytes when
+        # ``limit >= 0``, whichever comes first.
+        if len(self.cur_chunk) <= 0:
+            self.cur_chunk = self._pop_new_chunk()
+        line = self.cur_chunk
+        newline_index = line.find(b'\n')
+        if newline_index != -1:
+            line = line[:newline_index + 1]
+        if 0 <= limit < len(line):
+            line = line[:limit]
+        self.cur_chunk = self.cur_chunk[len(line):]
+        return line
 
     def read(self, amt=-1):
         return self.pop_current_chunk(amt)
@@ -1190,6 +1251,15 @@ class MockChunkedInvalidEncoding(MockChunkedEncodingResponse):
 
     def _encode_chunk(self, chunk):
         return 'ZZZ\r\n%s\r\n' % chunk.decode()
+
+
+class MockChunkedEncodingLongChunkSizeLine(MockChunkedEncodingResponse):
+
+    def _encode_chunk(self, chunk):
+        # A chunk-size line far longer than _MAX_CHUNK_LINE_LENGTH with no
+        # newline, simulating a malicious server that never terminates the
+        # size line (memory-exhaustion attack).
+        return b'f' * (2 ** 16 + 1024)
 
 
 class MockChunkedEncodingWithoutCRLFOnEnd(MockChunkedEncodingResponse):
