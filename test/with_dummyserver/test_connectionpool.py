@@ -1,3 +1,4 @@
+import json
 import io
 import logging
 import socket
@@ -17,6 +18,7 @@ from urllib3 import (
     encode_multipart_formdata,
     HTTPConnectionPool,
 )
+from urllib3._collections import HTTPHeaderDict
 from urllib3.exceptions import (
     ConnectTimeoutError,
     EmptyPoolError,
@@ -412,6 +414,17 @@ class TestConnectionPool(HTTPDummyServerTestCase):
         r = self.pool.request('GET', '/redirect', fields={'target': '/'})
         self.assertEqual(r.status, 200)
         self.assertEqual(r.data, b'Dummy server!')
+
+    def test_303_redirect_makes_request_lose_body(self):
+        with HTTPConnectionPool(self.host, self.port) as pool:
+            response = pool.request(
+                'POST',
+                '/redirect',
+                fields={'target': '/headers_and_params', 'status': '303 See Other'},
+            )
+        data = json.loads(response.data.decode('utf-8'))
+        assert data['params'] == {}
+        assert 'Content-Type' not in HTTPHeaderDict(data['headers'])
 
     def test_bad_connect(self):
         pool = HTTPConnectionPool('badhost.invalid', self.port)

@@ -6,6 +6,7 @@ import pytest
 from dummyserver.server import HAS_IPV6
 from dummyserver.testcase import (HTTPDummyServerTestCase,
                                   IPv6HTTPDummyServerTestCase)
+from urllib3._collections import HTTPHeaderDict
 from urllib3.poolmanager import PoolManager
 from urllib3.connectionpool import port_by_scheme
 from urllib3.exceptions import MaxRetryError
@@ -180,6 +181,20 @@ class TestPoolManager(HTTPDummyServerTestCase):
         self.assertNotIn('X-API-Secret', data)
 
         self.assertEqual(data['Authorization'], 'bar')
+
+    def test_303_redirect_makes_request_lose_body(self):
+        with PoolManager() as http:
+            response = http.request(
+                'POST',
+                '%s/redirect' % self.base_url,
+                fields={
+                    'target': '%s/headers_and_params' % self.base_url,
+                    'status': '303 See Other',
+                },
+            )
+        data = json.loads(response.data.decode('utf-8'))
+        assert data['params'] == {}
+        assert 'Content-Type' not in HTTPHeaderDict(data['headers'])
 
     def test_raise_on_redirect(self):
         http = PoolManager()
