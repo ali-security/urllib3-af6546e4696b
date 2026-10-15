@@ -725,6 +725,20 @@ class TestConnectionPool(HTTPDummyServerTestCase):
         pool = HTTPConnectionPool('thishostdoesnotexist.invalid', self.port, timeout=0.001)
         self.assertRaises(MaxRetryError, pool.request, 'GET', '/test', retries=2)
 
+    def test_invalid_method_not_allowed(self):
+        for char in [' ', '\r', '\n', '\x00']:
+            with pytest.raises(ValueError):
+                with HTTPConnectionPool(self.host, self.port) as pool:
+                    pool.request('GET' + char, '/')
+
+    def test_invalid_method_header_injection_not_allowed(self):
+        method = 'GET / HTTP/1.1\r\nX-Injected: 1\r\n\r\nGET'
+        with HTTPConnectionPool(self.host, self.port) as pool:
+            with pytest.raises(ValueError):
+                pool.urlopen(method, '/')
+            with pytest.raises(ValueError):
+                pool.urlopen(method, '/', body=b'data', chunked=True)
+
     def test_source_address(self):
         for addr, is_ipv6 in VALID_SOURCE_ADDRESSES:
             if is_ipv6 and not HAS_IPV6_AND_DNS:
