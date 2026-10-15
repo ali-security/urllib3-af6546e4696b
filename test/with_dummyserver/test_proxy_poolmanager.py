@@ -14,6 +14,7 @@ from urllib3.poolmanager import proxy_from_url, ProxyManager
 from urllib3.exceptions import (
     MaxRetryError, SSLError, ProxyError, ConnectTimeoutError)
 from urllib3.connectionpool import connection_from_url, VerifiedHTTPSConnection
+from urllib3.util.retry import RequestHistory
 
 
 class TestHTTPProxyManager(HTTPDummyProxyTestCase):
@@ -144,6 +145,93 @@ class TestHTTPProxyManager(HTTPDummyProxyTestCase):
                          fields={'target': '%s/echo?a=b' % self.http_url_alt},
                          timeout=1, retries=1)
         self.assertNotEqual(r._pool.host, self.http_host_alt)
+
+    _sensitive_headers = {
+        'Authorization': 'foo',
+        'Proxy-Authorization': 'bar',
+        'Cookie': 'foo=bar',
+    }
+    _sensitive_headers_lowercase = {
+        k.lower(): v for k, v in _sensitive_headers.items()}
+
+    def _check_cross_host_redirect_remove_headers_via_proxy_manager(
+            self, sensitive_headers):
+        headers_url = '%s/headers' % self.http_url_alt
+        initial_url = '%s/redirect?target=%s' % (self.http_url, headers_url)
+        with proxy_from_url(self.proxy_url) as proxy_mgr:
+            r = proxy_mgr.request('GET', initial_url, headers=sensitive_headers,
+                                  retries=1)
+            self.assertEqual(r.status, 200)
+            self.assertIsNotNone(r.retries)
+            self.assertEqual(r.retries.history, (
+                RequestHistory(method='GET', url=initial_url, error=None,
+                               status=303, redirect_location=headers_url),
+            ))
+            data = json.loads(r.data.decode('utf-8'))
+            received = set(header.lower() for header in data)
+            for header in sensitive_headers:
+                self.assertNotIn(header.lower(), received)
+
+    def test_cross_host_redirect_remove_headers_via_proxy_manager_capitalized(self):
+        self._check_cross_host_redirect_remove_headers_via_proxy_manager(
+            self._sensitive_headers)
+
+    def test_cross_host_redirect_remove_headers_via_proxy_manager_lowercase(self):
+        self._check_cross_host_redirect_remove_headers_via_proxy_manager(
+            self._sensitive_headers_lowercase)
+
+    def _check_cross_host_redirect_remove_headers_via_pool(self, sensitive_headers,
+                                                           status=303, headers=None):
+        headers_url = '%s/headers' % self.http_url_alt
+        if status == 303:
+            initial_url = '%s/redirect?target=%s' % (self.http_url, headers_url)
+        else:
+            initial_url = '%s/redirect?status=%d&target=%s' % (
+                self.http_url, status, headers_url)
+        if headers is None:
+            headers = sensitive_headers
+        with proxy_from_url(self.proxy_url) as proxy_mgr:
+            pool = proxy_mgr.connection_from_url(self.http_url)
+            r = pool.urlopen('GET', initial_url, headers=headers, retries=1,
+                             redirect=True, assert_same_host=False,
+                             preload_content=True)
+            self.assertEqual(r.status, 200)
+            self.assertIsNotNone(r.retries)
+            self.assertEqual(r.retries.history, (
+                RequestHistory(method='GET', url=initial_url, error=None,
+                               status=status, redirect_location=headers_url),
+            ))
+            data = json.loads(r.data.decode('utf-8'))
+            received = set(header.lower() for header in data)
+            for header in sensitive_headers:
+                self.assertNotIn(header.lower(), received)
+            return received
+
+    def test_cross_host_redirect_remove_headers_via_pool_capitalized(self):
+        self._check_cross_host_redirect_remove_headers_via_pool(
+            self._sensitive_headers)
+
+    def test_cross_host_redirect_remove_headers_via_pool_lowercase(self):
+        self._check_cross_host_redirect_remove_headers_via_pool(
+            self._sensitive_headers_lowercase)
+
+    def test_cross_host_redirect_remove_headers_via_pool_307(self):
+        # A 307 keeps the caller's plain dict headers (a 303 converts them to
+        # an HTTPHeaderDict); header names are matched case-insensitively and
+        # headers that are not sensitive are still forwarded.
+        sensitive_headers = {
+            'AUTHORIZATION': 'foo',
+            'proxy-AUTHORIZATION': 'bar',
+            'CooKie': 'foo=bar',
+        }
+        headers = dict(sensitive_headers)
+        headers['X-Not-Sensitive'] = 'kept'
+        original = dict(headers)
+        received = self._check_cross_host_redirect_remove_headers_via_pool(
+            sensitive_headers, status=307, headers=headers)
+        self.assertIn('x-not-sensitive', received)
+        # The caller's headers are not modified.
+        self.assertEqual(headers, original)
 
     def test_cross_protocol_redirect(self):
         http = proxy_from_url(self.proxy_url)
