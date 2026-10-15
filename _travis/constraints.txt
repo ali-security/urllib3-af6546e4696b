@@ -1,0 +1,7 @@
+# cryptography >= 37 bundles OpenSSL 3.0, which refuses the TLSv1/TLSv1.1 handshakes test_pyopenssl exercises;
+# 36.0.2 is the last release bundling OpenSSL 1.1.1 (older Pythons resolve older releases by python_requires).
+cryptography==36.0.2; python_version >= "3.6"
+# lazy-object-proxy 1.7 (pulled in by pylint<2.0 -> astroid on 2.7) uses a bare super() in setup.py and cannot build on Python 2.
+lazy-object-proxy<1.7; python_version < "3"
+# wrapt 1.13 (pulled in by pylint -> astroid) reads its version via setup.cfg `attr:`, which the setuptools in a 3.4 tox env cannot parse.
+wrapt<1.13; python_version < "3.5"

@@ -1,27 +1,34 @@
 language: python
+os: linux
+dist: xenial
 script:
   - ./_travis/run.sh
 before_install:
   - openssl version
-after_success:
-  - ./_travis/upload_coverage.sh
-cache:
-  directories:
-  - ${HOME}/.cache
+  # The dummyserver test certificates (dummyserver/certs) expired in 2021;
+  # _travis/run.sh runs the suite under faketime at the release date. Build
+  # libfaketime 0.9.10 rather than xenial's 0.9.6 package: 0.9.6 does not
+  # intercept sem_timedwait, so Python 3's threading.Event.wait(5) times out
+  # at once and every socket-level dummyserver fails to start.
+  - git clone --depth 1 --branch v0.9.10 https://github.com/wolfcw/libfaketime.git /tmp/libfaketime
+  - make -C /tmp/libfaketime
+  - sudo make -C /tmp/libfaketime install
+  - command -v faketime
+  # test_dotted_fqdn / test_request_host_header_ignores_fqdn_dot connect to
+  # "localhost." (trailing dot), which xenial's resolver does not map to loopback.
+  - echo "127.0.0.1 localhost." | sudo tee -a /etc/hosts
 install:
   - ./_travis/install.sh
 notifications:
   email: false
 env:
   global:
-    - GAE_SDK_PATH=${HOME}/.cache/google_appengine
     - PYTHONWARNINGS=always::DeprecationWarning
-  matrix:
-    - TOXENV=flake8-py3
-    - TOXENV=gae
-    - TOXENV=docs
-# https://github.com/travis-ci/travis-ci/issues/4794
-matrix:
+    # Registry time machine. 2022-07-15, not the 2019-04-17 release date: pytest
+    # needs atomicwrites, whose whole PyPI file history was re-uploaded on
+    # 2022-07-09, so earlier dates find no atomicwrites distribution.
+    - PIP_INDEX_URL=https://:2022-07-15@time-machines-pypi.sealsecurity.io/
+jobs:
   include:
     - python: 2.7
       env: TOXENV=py27
@@ -31,25 +38,5 @@ matrix:
       env: TOXENV=py35
     - python: 3.6
       env: TOXENV=py36
-    - python: 3.7-dev
+    - python: 3.7
       env: TOXENV=py37
-    - python: pypy-5.4
-      env: TOXENV=pypy
-    - language: generic
-      os: osx
-      env: TOXENV=py27
-    - language: generic
-      os: osx
-      env: TOXENV=py34
-    - language: generic
-      os: osx
-      env: TOXENV=py35
-    - language: generic
-      os: osx
-      env: TOXENV=py36
-    - language: generic
-      os: osx
-      env: TOXENV=py37
-  allow_failures:
-  - python: pypy-5.4
-sudo: false
